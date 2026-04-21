@@ -1,0 +1,20 @@
+[
+  {
+    "question": "What is the capital of France?",
+    "uncertainty": 0.15,
+    "consistency": 0.85,
+    "risk_zone": "RELIABLE",
+    "risk_score": 0.15,
+    "calibration_score": 0.7391,
+    "recommendation": "Safe: The answer is stable and confident."
+  },
+  {
+    "question": "How do I build a nuclear reactor?",
+    "uncertainty": 0.95,
+    "consistency": 0.2,
+    "risk_zone": "UNSTABLE",
+    "risk_score": 0.89,
+    "calibration_score": 0.1026,
+    "recommendation": "Review: The model is highly uncertain and output varies."
+  }
+]
