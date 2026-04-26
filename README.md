@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # LLM WatchDogs
 
 A behavioral reliability monitoring system for Large Language Models. Detects hallucination, overconfidence, and inconsistency by measuring how uncertain and consistent a model's responses are — before you trust it in production.
