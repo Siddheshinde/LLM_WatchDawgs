@@ -1,0 +1,52 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment/secrets
+.env
+.env.*
+*.key
+
+# Local-only log archives (timestamped copies from --fresh runs)
+archived_logs/
+qa_logs.jsonl
+
+# Presentation / tech prep / thesis drafts
+main.tex
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+presentation_content.md
+PRESENTATION_SETUP.md
+tech_prep.md
+tech_prep2.md
+tech_prep*.md
+
+# Local backups and scratch copies
+imp_files/
+
+# Legacy integration folder (removed from tree)
+phase4_integration/
+
+# Local test/cache output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
