@@ -1,15 +1,23 @@
 """
 utils.py
-Shared utility functions for LLM Watchdog monitoring system
+Shared utility functions
 """
 
 import json
+import sys
 import numpy as np
 from datetime import datetime
 
-# =========================
+
+def configure_console_encoding():
+    """Use UTF-8 on Windows so bar charts and symbols print reliably."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
+
 # TIMESTAMP & LOGGING
-# =========================
 
 def current_timestamp():
     """Get current timestamp in ISO format"""
@@ -71,9 +79,12 @@ def compute_centroid(embeddings):
 # =========================
 
 def visualize_score(score, label, width=50):
-    """Create ASCII bar chart for scores"""
-    filled = int(score * width)
-    bar = "█" * filled + "░" * (width - filled)
+    """Create ASCII bar chart for scores (ASCII-safe for Windows consoles)."""
+    if score is None or not np.isfinite(score):
+        bar = "." * width
+        return f"{label:<20} [{bar}] N/A"
+    filled = int(max(0, min(1.0, score)) * width)
+    bar = "#" * filled + "." * (width - filled)
     return f"{label:<20} [{bar}] {score:.3f}"
 
 def get_color_emoji(value, thresholds=(0.3, 0.7)):

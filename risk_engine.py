@@ -5,6 +5,9 @@ Risk assessment engine for LLM behavioral monitoring
 
 import numpy as np
 
+UNCERTAINTY_HIGH_THRESHOLD = 0.12
+CONSISTENCY_HIGH_THRESHOLD = 0.75
+
 # =========================
 # RISK SCORING FUNCTIONS
 # =========================
@@ -24,8 +27,10 @@ def calculate_calibration_score(uncertainty, consistency):
         consistency (float): 0 to 1, higher = more consistent
     
     Returns:
-        float: Calibration score
+        float | None: Calibration score, or None if inputs are invalid
     """
+    if uncertainty is None or consistency is None:
+        return None
     return consistency / (1 + uncertainty)
 
 def calculate_risk_score(uncertainty, consistency):
@@ -47,8 +52,10 @@ def calculate_risk_score(uncertainty, consistency):
         consistency (float): 0 to 1
     
     Returns:
-        float: Risk score
+        float | None: Risk score, or None if inputs are invalid
     """
+    if uncertainty is None or consistency is None:
+        return None
     return (0.6 * uncertainty) + (0.4 * (1 - consistency))
 
 # =========================
@@ -60,19 +67,13 @@ def classify_risk_zone(uncertainty, consistency):
     Classify model behavior into risk zones using 2x2 matrix
     
     Risk Matrix:
-    ┌─────────────────┬──────────────────┬──────────────────┐
-    │                 │  Low Consistency  │  High Consistency │
-    ├─────────────────┼──────────────────┼──────────────────┤
-    │ Low Uncertainty │  OVERCONFIDENT   │    RELIABLE      │
-    │                 │   (DANGEROUS)    │     (SAFE)       │
-    ├─────────────────┼──────────────────┼──────────────────┤
-    │ High Uncertainty│    UNSTABLE      │    AMBIGUOUS     │
-    │                 │  (HALLUCINATING) │  (APPROPRIATE)   │
-    └─────────────────┴──────────────────┴──────────────────┘
+                    Low Consistency    High Consistency
+    Low Uncertainty OVERCONFIDENT      RELIABLE
+    High Uncertainty UNSTABLE          AMBIGUOUS
     
     Thresholds:
-    - High uncertainty: > 0.4
-    - High consistency: > 0.6
+    - High uncertainty: > 0.12
+    - High consistency: >= 0.75
     
     Args:
         uncertainty (float): 0 to 1
@@ -81,8 +82,11 @@ def classify_risk_zone(uncertainty, consistency):
     Returns:
         str: Risk zone name
     """
-    high_uncertainty = uncertainty > 0.4
-    high_consistency = consistency > 0.6
+    if uncertainty is None or consistency is None:
+        return "UNKNOWN"
+
+    high_uncertainty = uncertainty > UNCERTAINTY_HIGH_THRESHOLD
+    high_consistency = consistency >= CONSISTENCY_HIGH_THRESHOLD
     
     if not high_uncertainty and high_consistency:
         return "RELIABLE"
@@ -111,28 +115,28 @@ def get_risk_metadata(zone):
     metadata = {
         "RELIABLE": {
             "color": "#10b981",
-            "emoji": "✅",
+            "emoji": "OK",
             "severity": 1,
             "description": "Model is confident and consistent",
             "recommendation": "Safe to use. High confidence in answer."
         },
         "OVERCONFIDENT": {
             "color": "#ef4444",
-            "emoji": "⛔",
+            "emoji": "STOP",
             "severity": 4,
             "description": "Model appears confident but changes answer when rephrased",
             "recommendation": "DO NOT TRUST. Model may be hallucinating with false confidence."
         },
         "UNSTABLE": {
             "color": "#f59e0b",
-            "emoji": "⚠️",
+            "emoji": "WARN",
             "severity": 3,
             "description": "Model gives variable answers and is uncertain",
             "recommendation": "Flag for human review. High hallucination risk."
         },
         "AMBIGUOUS": {
             "color": "#6366f1",
-            "emoji": "ℹ️",
+            "emoji": "INFO",
             "severity": 2,
             "description": "Model is uncertain but consistent in expressing uncertainty",
             "recommendation": "Question may need clarification or is genuinely subjective."
@@ -141,7 +145,7 @@ def get_risk_metadata(zone):
     
     return metadata.get(zone, {
         "color": "#gray",
-        "emoji": "❓",
+        "emoji": "?",
         "severity": 2,
         "description": "Unknown risk zone",
         "recommendation": "Unable to classify"
@@ -162,11 +166,26 @@ def generate_risk_report(uncertainty, consistency):
     Returns:
         dict: Complete risk assessment
     """
-    calibration = calculate_calibration_score(uncertainty, consistency)
-    risk_score = calculate_risk_score(uncertainty, consistency)
     risk_zone = classify_risk_zone(uncertainty, consistency)
     metadata = get_risk_metadata(risk_zone)
-    
+
+    if uncertainty is None or consistency is None:
+        return {
+            "uncertainty": None,
+            "consistency": None,
+            "calibration_score": None,
+            "risk_score": None,
+            "risk_zone": risk_zone,
+            "severity": 0,
+            "color": metadata["color"],
+            "emoji": metadata["emoji"],
+            "description": "Unable to assess risk because uncertainty or consistency could not be computed.",
+            "recommendation": "Check whether Ollama embeddings are available, the model supports embeddings, and the API response is valid."
+        }
+
+    calibration = calculate_calibration_score(uncertainty, consistency)
+    risk_score = calculate_risk_score(uncertainty, consistency)
+
     return {
         "uncertainty": round(uncertainty, 4),
         "consistency": round(consistency, 4),

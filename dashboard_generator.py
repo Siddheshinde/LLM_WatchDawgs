@@ -1,13 +1,16 @@
 """
 dashboard_generator.py
-Generate professional interactive HTML dashboard from monitoring logs.
-Integrates Phase 2 Temporal Intelligence data.
+Generate the light-themed dashboard (dashboard.html + reports_data.js).
 """
 
 import json
+import shutil
+from pathlib import Path
+
 import numpy as np
 from datetime import datetime
 from utils import load_logs, format_timestamp
+from generate_reports_data import KEEP_FIELDS, load_reports, write_js
 from risk_engine import analyze_risk_distribution
 from temporal_preview import generate_temporal_report
 
@@ -27,10 +30,10 @@ def aggregate_dashboard_data(records):
         return None
 
     total = len(records)
-    uncertainties = [r["uncertainty_score"] for r in records]
-    consistencies  = [r["consistency_score"]  for r in records]
-    calibrations   = [r.get("calibration_score", 0) for r in records]
-    risk_scores    = [r.get("risk_score", 0)        for r in records]
+    uncertainties = [r["uncertainty_score"] for r in records if r.get("uncertainty_score") is not None]
+    consistencies  = [r["consistency_score"] for r in records if r.get("consistency_score") is not None]
+    calibrations   = [r.get("calibration_score") for r in records if r.get("calibration_score") is not None]
+    risk_scores    = [r.get("risk_score") for r in records if r.get("risk_score") is not None]
 
     risk_dist = analyze_risk_distribution(records)
     temporal  = generate_temporal_report(records)
@@ -41,14 +44,22 @@ def aggregate_dashboard_data(records):
         cat = record.get("category", "unknown")
         categories.setdefault(cat, []).append(record)
 
+    def safe_mean(values):
+        return float(np.mean(values)) if values else 0.0
+
     category_stats = {}
     for cat, recs in categories.items():
+        cat_uncertainties = [r["uncertainty_score"] for r in recs if r.get("uncertainty_score") is not None]
+        cat_consistencies = [r["consistency_score"] for r in recs if r.get("consistency_score") is not None]
+        cat_calibrations = [r.get("calibration_score") for r in recs if r.get("calibration_score") is not None]
+        cat_risks = [r.get("risk_score") for r in recs if r.get("risk_score") is not None]
+
         category_stats[cat] = {
             "count":             len(recs),
-            "mean_uncertainty":  float(np.mean([r["uncertainty_score"] for r in recs])),
-            "mean_consistency":  float(np.mean([r["consistency_score"]  for r in recs])),
-            "mean_calibration":  float(np.mean([r.get("calibration_score", 0) for r in recs])),
-            "mean_risk":         float(np.mean([r.get("risk_score", 0)        for r in recs])),
+            "mean_uncertainty":  safe_mean(cat_uncertainties),
+            "mean_consistency":  safe_mean(cat_consistencies),
+            "mean_calibration":  safe_mean(cat_calibrations),
+            "mean_risk":         safe_mean(cat_risks),
             "reliable_count":     sum(1 for r in recs if r.get("risk_zone") == "RELIABLE"),
             "overconfident_count":sum(1 for r in recs if r.get("risk_zone") == "OVERCONFIDENT"),
             "unstable_count":     sum(1 for r in recs if r.get("risk_zone") == "UNSTABLE"),
@@ -75,20 +86,23 @@ def aggregate_dashboard_data(records):
         if total else 0, 1
     )
 
+    def safe_mean(values):
+        return float(np.mean(values)) if values else 0.0
+
     return {
         "total_interactions": total,
         "model":  records[0].get("model", "llama3"),
         "time_range": {
-            "first": records[0]["timestamp"],
-            "last":  records[-1]["timestamp"],
+            "first": records[0].get("timestamp"),
+            "last":  records[-1].get("timestamp"),
         },
         "overall_stats": {
-            "mean_uncertainty":  float(np.mean(uncertainties)),
-            "std_uncertainty":   float(np.std(uncertainties)),
-            "mean_consistency":  float(np.mean(consistencies)),
-            "std_consistency":   float(np.std(consistencies)),
-            "mean_calibration":  float(np.mean(calibrations)),
-            "mean_risk":         float(np.mean(risk_scores)),
+            "mean_uncertainty":  safe_mean(uncertainties),
+            "std_uncertainty":   float(np.std(uncertainties)) if uncertainties else 0.0,
+            "mean_consistency":  safe_mean(consistencies),
+            "std_consistency":   float(np.std(consistencies)) if consistencies else 0.0,
+            "mean_calibration":  safe_mean(calibrations),
+            "mean_risk":         safe_mean(risk_scores),
         },
         "reliable_pct": reliable_pct,
         "risk_distribution":  risk_dist,
@@ -98,9 +112,9 @@ def aggregate_dashboard_data(records):
         "category_stats":     category_stats,
         "time_series": {
             "timestamps":  list(range(len(records))),
-            "uncertainty": [r["uncertainty_score"]      for r in records],
-            "consistency": [r["consistency_score"]       for r in records],
-            "calibration": [r.get("calibration_score",0) for r in records],
+            "uncertainty": [r.get("uncertainty_score") for r in records],
+            "consistency": [r.get("consistency_score") for r in records],
+            "calibration": [r.get("calibration_score") for r in records],
         },
         "recent_interactions": records[-15:],
     }
@@ -112,16 +126,25 @@ def aggregate_dashboard_data(records):
 
 def _score_cls(v, invert=False):
     """Return CSS class based on score value."""
+    if v is None:
+        return "warn"
     hi = v > 0.6; lo = v < 0.35
     if invert:
         return "good" if hi else ("warn" if not lo else "danger")
     return "danger" if hi else ("warn" if not lo else "good")
 
 def _pill(v, invert=False):
+    if v is None:
+        return "mid"
     hi = v > 0.6; lo = v < 0.35
     if invert:
         return "lo" if hi else ("mid" if not lo else "hi")
     return "hi" if hi else ("mid" if not lo else "lo")
+
+def _fmt_score(v, ndigits=3):
+    if v is None:
+        return "—"
+    return f"{v:.{ndigits}f}"
 
 
 def generate_alerts_html(data):
@@ -348,8 +371,9 @@ def generate_recent_table_html(recent):
     for record in reversed(recent):
         zone  = record.get("risk_zone", "UNKNOWN")
         badge = f"risk-{zone.lower()}"
-        u, c  = record["uncertainty_score"], record["consistency_score"]
-        cal   = record.get("calibration_score", 0)
+        u   = record.get("uncertainty_score")
+        c   = record.get("consistency_score")
+        cal = record.get("calibration_score")
         q     = record["question"]
         q_d   = (q[:68] + "…") if len(q) > 68 else q
 
@@ -357,9 +381,9 @@ def generate_recent_table_html(recent):
           <td class="ts-cell">{format_timestamp(record['timestamp'])}</td>
           <td><span class="q-text" title="{q}">{q_d}</span></td>
           <td><span class="risk-badge {badge}">{zone}</span></td>
-          <td><span class="score-pill {_pill(u)}" style="font-family:var(--mono);font-size:11px">{u:.3f}</span></td>
-          <td><span class="score-pill {_pill(c,True)}" style="font-family:var(--mono);font-size:11px">{c:.3f}</span></td>
-          <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">{cal:.3f}</td>
+          <td><span class="score-pill {_pill(u)}" style="font-family:var(--mono);font-size:11px">{_fmt_score(u)}</span></td>
+          <td><span class="score-pill {_pill(c,True)}" style="font-family:var(--mono);font-size:11px">{_fmt_score(c)}</span></td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">{_fmt_score(cal)}</td>
         </tr>""")
 
     return f"""<table class="recent-table">
@@ -1383,28 +1407,104 @@ if (document.getElementById('catChart')) {{
 
 
 # =========================
+# LIGHT DASHBOARD (template + reports_data.js)
+# =========================
+
+TEMPLATE_FILE = Path(__file__).with_name("dashboard_template.html")
+REPORTS_DATA_FILE = "reports_data.js"
+
+
+def _is_pipeline_report(record):
+    return "run_timestamp" in record or "pipeline_version" in record
+
+
+def _qa_log_to_report(record):
+    ts = record.get("timestamp", "")
+    return {
+        "run_timestamp": ts,
+        "question": record.get("question"),
+        "category": record.get("category"),
+        "model": record.get("model"),
+        "num_samples": record.get("num_samples"),
+        "num_paraphrases": record.get("num_paraphrases"),
+        "uncertainty_score": record.get("uncertainty_score"),
+        "consistency_score": record.get("consistency_score"),
+        "calibration_score": record.get("calibration_score"),
+        "risk_score": record.get("risk_score"),
+        "risk_zone": record.get("risk_zone"),
+        "severity": record.get("severity"),
+        "window_key": ts[:10] if ts else "unknown",
+        "drift_score": 0.0,
+        "drift_alert": False,
+        "change_point": False,
+        "delta_uncertainty": 0.0,
+        "delta_consistency": 0.0,
+        "alerts": [],
+        "alert_count": 0,
+        "execution_time_seconds": record.get("execution_time_seconds"),
+    }
+
+
+def _records_for_dashboard(log_file):
+    path = Path(log_file)
+    if not path.exists():
+        return []
+
+    if log_file.endswith("final_risk_reports.jsonl") or "risk_reports" in path.name:
+        return [{k: v for k, v in r.items() if k in KEEP_FIELDS} for r in load_reports(log_file)]
+
+    records = load_logs(log_file)
+    if not records:
+        return []
+    if _is_pipeline_report(records[0]):
+        return [{k: v for k, v in r.items() if k in KEEP_FIELDS} for r in records]
+    return [_qa_log_to_report(r) for r in records]
+
+
+def _resolve_template(output_file):
+    template = TEMPLATE_FILE
+    if not template.exists():
+        candidate = Path(output_file)
+        if candidate.exists() and "--bg:#F6F7F9" in candidate.read_text(encoding="utf-8"):
+            return candidate
+        raise FileNotFoundError(
+            f"Dashboard template not found: {TEMPLATE_FILE}. "
+            "Restore dashboard_template.html from imp_files/."
+        )
+    return template
+
+
+# =========================
 # MAIN ENTRY POINT
 # =========================
 
 def generate_dashboard(log_file="qa_monitoring_logs.jsonl", output_file="dashboard.html"):
-    print("Loading logs...")
-    records = load_logs(log_file)
+    reports_path = Path("final_risk_reports.jsonl")
+    source = log_file
+    if log_file == "qa_monitoring_logs.jsonl" and reports_path.exists():
+        source = str(reports_path)
+        print(f"Using pipeline reports: {source}")
+
+    print("Loading records...")
+    records = _records_for_dashboard(source)
+    if not records and source != log_file:
+        print(f"  No records in {source}, falling back to {log_file}")
+        records = _records_for_dashboard(log_file)
+
     if not records:
-        print(f"No records found in {log_file}")
+        print(f"No records found in {source}" + (f" or {log_file}" if source != log_file else ""))
         return False
 
     print(f"Loaded {len(records)} records")
-    print("Aggregating data...")
-    data = aggregate_dashboard_data(records)
+    print(f"Writing {REPORTS_DATA_FILE}...")
+    write_js(records, REPORTS_DATA_FILE)
 
-    print("Generating HTML...")
-    html = generate_html_dashboard(data)
-
-    print(f"Writing to {output_file}...")
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(html)
+    template = _resolve_template(output_file)
+    print(f"Copying light dashboard template -> {output_file}...")
+    shutil.copy2(template, output_file)
 
     print(f"Dashboard generated: {output_file}")
+    print(f"Data file written:   {REPORTS_DATA_FILE}")
     return True
 
 

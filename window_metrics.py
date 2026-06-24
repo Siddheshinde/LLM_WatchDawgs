@@ -10,6 +10,22 @@ time bucket (e.g., one 24-hour period).
 import numpy as np
 
 
+def _numeric_values(records, key):
+    """Return finite numeric values for a metric key, skipping missing/None values."""
+    values = []
+    for record in records:
+        value = record.get(key)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    return values
+
+
 # =========================
 # CORE WINDOW FUNCTION
 # =========================
@@ -40,15 +56,8 @@ def compute_window_metrics(records):
             "num_samples":      0
         }
 
-    uncertainties = np.array([
-        r["uncertainty_score"] for r in records
-        if "uncertainty_score" in r
-    ], dtype=float)
-
-    consistencies = np.array([
-        r["consistency_score"] for r in records
-        if "consistency_score" in r
-    ], dtype=float)
+    uncertainties = np.array(_numeric_values(records, "uncertainty_score"), dtype=float)
+    consistencies = np.array(_numeric_values(records, "consistency_score"), dtype=float)
 
     # Guard: if all records were malformed and we got empty arrays
     if len(uncertainties) == 0:
@@ -118,11 +127,20 @@ def compute_window_calibration(records):
 
     scores = []
     for r in records:
-        if "calibration_score" in r:
-            scores.append(r["calibration_score"])
-        elif "uncertainty_score" in r and "consistency_score" in r:
+        calibration = r.get("calibration_score")
+        if calibration is not None:
+            try:
+                calibration = float(calibration)
+            except (TypeError, ValueError):
+                calibration = None
+            if calibration is not None and np.isfinite(calibration):
+                scores.append(calibration)
+        elif r.get("uncertainty_score") is not None and r.get("consistency_score") is not None:
             u = r["uncertainty_score"]
             c = r["consistency_score"]
-            scores.append(c / (1 + u))
+            try:
+                scores.append(float(c) / (1 + float(u)))
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
 
     return float(np.mean(scores)) if scores else 0.0

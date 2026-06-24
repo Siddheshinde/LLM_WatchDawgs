@@ -21,6 +21,7 @@ Pipeline:
 
 import json
 from datetime import datetime, timedelta
+from collections import Counter
 
 import numpy as np
 
@@ -286,11 +287,18 @@ def run_temporal_analysis(log_file="qa_monitoring_logs.jsonl", window_size="24h"
     def get_embeddings(bucket_key):
         """Extract valid question_embedding vectors from a bucket."""
         recs = buckets.get(bucket_key, [])
-        return [
+        embeddings = [
             r["question_embedding"]
             for r in recs
-            if r.get("question_embedding") and len(r["question_embedding"]) > 0
+            if isinstance(r.get("question_embedding"), list)
+            and len(r["question_embedding"]) > 0
         ]
+        if not embeddings:
+            return []
+
+        dim_counts = Counter(len(e) for e in embeddings)
+        dominant_dim = dim_counts.most_common(1)[0][0]
+        return [e for e in embeddings if len(e) == dominant_dim]
 
     print("\n  Computing drift and change points between windows...")
 
@@ -310,7 +318,7 @@ def run_temporal_analysis(log_file="qa_monitoring_logs.jsonl", window_size="24h"
         emb_prev = get_embeddings(prev_win["window_key"])
         emb_curr = get_embeddings(curr_win["window_key"])
 
-        if emb_prev and emb_curr:
+        if emb_prev and emb_curr and len(emb_prev[0]) == len(emb_curr[0]):
             dreport = drift_report(emb_prev, emb_curr)
             curr_win["drift_score"]    = dreport["drift_score"]
             curr_win["drift_alert"]    = dreport["drift_alert"]

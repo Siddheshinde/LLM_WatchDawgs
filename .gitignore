@@ -27,7 +27,6 @@ main.tex
 *.fdb_latexmk
 *.fls
 presentation_content.md
-PRESENTATION_SETUP.md
 tech_prep.md
 tech_prep2.md
 tech_prep*.md

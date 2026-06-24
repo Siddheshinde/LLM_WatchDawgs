@@ -31,10 +31,12 @@ def compute_rolling_statistics(records, window_size=5):
     
     recent = records[-window_size:]
     
-    uncertainties = [r["uncertainty_score"] for r in recent]
-    consistencies = [r["consistency_score"] for r in recent]
-    calibrations = [r.get("calibration_score", 0) for r in recent]
-    
+    # Some records can have None for these metrics (e.g. embedding failure).
+    # Convert None -> NaN so numpy reductions don’t crash.
+    uncertainties = [np.nan if r.get("uncertainty_score") is None else r.get("uncertainty_score") for r in recent]
+    consistencies = [np.nan if r.get("consistency_score") is None else r.get("consistency_score") for r in recent]
+    calibrations = [np.nan if r.get("calibration_score") is None else r.get("calibration_score") for r in recent]
+
     return {
         "window_size": window_size,
         "mean_uncertainty": np.mean(uncertainties),
@@ -84,9 +86,22 @@ def detect_simple_trend(records, metric="uncertainty_score"):
     first_half = records[:mid]
     second_half = records[mid:]
     
-    # Compute means
-    mean1 = np.mean([r[metric] for r in first_half])
-    mean2 = np.mean([r[metric] for r in second_half])
+    # Compute means (metric values can be None)
+    vals1 = [r.get(metric) for r in first_half]
+    vals2 = [r.get(metric) for r in second_half]
+    vals1 = [np.nan if v is None else v for v in vals1]
+    vals2 = [np.nan if v is None else v for v in vals2]
+
+    mean1 = np.nanmean(vals1)
+    mean2 = np.nanmean(vals2)
+
+    if np.isnan(mean1) or np.isnan(mean2):
+        return {
+            "trend": "INSUFFICIENT_DATA",
+            "confidence": 0.0,
+            "description": "Not enough valid metric values (None/NaN) for trend analysis",
+        }
+
     
     delta = mean2 - mean1
     delta_pct = (delta / mean1 * 100) if mean1 > 0 else 0
@@ -167,8 +182,12 @@ def generate_temporal_report(records):
         return {"error": "No records available"}
     
     # Overall statistics
-    all_uncertainties = [r["uncertainty_score"] for r in records]
-    all_consistencies = [r["consistency_score"] for r in records]
+    all_uncertainties = [r.get("uncertainty_score") for r in records]
+    all_consistencies = [r.get("consistency_score") for r in records]
+
+    all_uncertainties = [np.nan if v is None else v for v in all_uncertainties]
+    all_consistencies = [np.nan if v is None else v for v in all_consistencies]
+
     
     # Rolling window analysis
     rolling_5 = compute_rolling_statistics(records, window_size=5)
@@ -201,8 +220,9 @@ def generate_temporal_report(records):
         },
         "recent_24h": {
             "count": len(recent_24h),
-            "mean_uncertainty": np.mean([r["uncertainty_score"] for r in recent_24h]) if recent_24h else 0,
-            "mean_consistency": np.mean([r["consistency_score"] for r in recent_24h]) if recent_24h else 0
+            "mean_uncertainty": np.nanmean([r.get("uncertainty_score") for r in recent_24h]) if recent_24h else 0,
+            "mean_consistency": np.nanmean([r.get("consistency_score") for r in recent_24h]) if recent_24h else 0
+
         }
     }
 

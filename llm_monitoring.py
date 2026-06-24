@@ -20,6 +20,7 @@ from risk_engine import generate_risk_report
 # =========================
 
 MODEL_NAME = "llama3"
+EMBEDDING_MODEL_NAME = "nomic-embed-text"
 LOG_FILE = "qa_monitoring_logs.jsonl"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
@@ -43,9 +44,18 @@ def call_llm(prompt, temperature=0.7, max_tokens=512):
 
     try:
         response = requests.post(url, json=payload, timeout=60)
-        return response.json()["response"]
-    except Exception as e:
+        response.raise_for_status()
+        data = response.json()
+        reply = data.get("response")
+        if reply is None:
+            print(f"LLM call error: no 'response' in Ollama reply: {data}")
+            return None
+        return reply
+    except requests.exceptions.RequestException as e:
         print(f"LLM call error: {e}")
+        return None
+    except ValueError as e:
+        print(f"LLM call error: invalid JSON response: {e}")
         return None
 
 # =========================
@@ -54,18 +64,32 @@ def call_llm(prompt, temperature=0.7, max_tokens=512):
 
 def get_embedding(text):
     """Get embedding vector via Ollama API"""
-    url = f"{OLLAMA_BASE_URL}/api/embeddings"
+    url = f"{OLLAMA_BASE_URL}/api/embed"
 
     payload = {
-        "model": MODEL_NAME,
-        "prompt": text
+        "model": EMBEDDING_MODEL_NAME,
+        "input": text
     }
 
     try:
         response = requests.post(url, json=payload, timeout=30)
-        return response.json()["embedding"]
-    except Exception as e:
-        print(f"Embedding error: {e}")
+        response.raise_for_status()
+        data = response.json()
+        embeddings = data.get("embeddings")
+        emb = embeddings[0] if embeddings else None
+        if emb is None:
+            print(f"Embedding error: no embedding vector in Ollama reply: {data}")
+            return None
+        return emb
+    except requests.exceptions.HTTPError as e:
+        print(f"Embedding HTTP error: {e}")
+        print(f"Embedding response body: {response.text}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Embedding request error: {e}")
+        return None
+    except ValueError as e:
+        print(f"Embedding error: invalid JSON response: {e}")
         return None
 
 # =========================
@@ -99,10 +123,26 @@ Paraphrased questions:"""
     # Clean up numbering, bullets, quotes
     cleaned = []
     for line in lines:
-        line = line.lstrip("0123456789.-•*) ")
+        line = line.lstrip("0123456789.-* )")
         line = line.strip('"\'')
         if line and len(line) > 10:
             cleaned.append(line)
+
+    if len(cleaned) < num_paraphrases:
+        print(f"  [WARN] Generated {len(cleaned)} paraphrase(s), expected {num_paraphrases}. Retrying with simpler prompt...")
+        prompt = f"""Generate exactly {num_paraphrases} paraphrased questions for the original question below. Each one should preserve the same meaning and be written as a complete question. Output one paraphrase per line, without numbering or extra commentary.\n\nOriginal question: {question}\nParaphrased questions:"""
+        response = call_llm(prompt, temperature=0.7, max_tokens=256)
+        if response:
+            lines = [line.strip() for line in response.split("\n") if line.strip()]
+            cleaned = []
+            for line in lines:
+                line = line.lstrip("0123456789.-* )")
+                line = line.strip('"\'')
+                if line and len(line) > 10:
+                    cleaned.append(line)
+
+    if len(cleaned) < num_paraphrases:
+        print(f"  [WARN] Only {len(cleaned)} paraphrase(s) available; consistency may be incomplete.")
 
     return cleaned[:num_paraphrases]
 
@@ -131,7 +171,8 @@ def measure_uncertainty(question, samples=10, temperature=0.8):
     print()
 
     if len(answers) < 2:
-        return 1.0, answers, []
+        print("  [WARN] Not enough answer samples to compute uncertainty.")
+        return None, answers, []
 
     # Get embeddings
     print(f"  [2/3] Computing embeddings...")
@@ -145,7 +186,8 @@ def measure_uncertainty(question, samples=10, temperature=0.8):
     print()
 
     if len(embeddings) < 2:
-        return 1.0, answers, embeddings
+        print("  [WARN] Not enough answer embeddings to compute uncertainty.")
+        return None, answers, embeddings
 
     # Compute uncertainty
     print(f"  [3/3] Computing uncertainty...")
@@ -157,8 +199,8 @@ def measure_uncertainty(question, samples=10, temperature=0.8):
     
     execution_time = time.time() - start_time
 
-    print(f"  → Similarity: μ={mean_similarity:.3f}, σ={std_similarity:.3f}")
-    print(f"  → Execution time: {execution_time:.1f}s")
+    print(f"  -> Similarity: mean={mean_similarity:.3f}, std={std_similarity:.3f}")
+    print(f"  -> Execution time: {execution_time:.1f}s")
 
     return float(uncertainty_score), answers, embeddings
 
@@ -178,8 +220,11 @@ def measure_consistency(question, num_paraphrases=3, temperature=0.3):
     paraphrases = generate_paraphrases(question, num_paraphrases)
 
     if not paraphrases:
-        print("  ⚠ Failed to generate paraphrases")
-        return 0.0, [], [], []
+        print("  [WARN] Failed to generate paraphrases")
+        return None, [], [], []
+
+    if len(paraphrases) < num_paraphrases:
+        print(f"  [WARN] Only {len(paraphrases)} paraphrases were generated; expected {num_paraphrases}.")
 
     # Compute paraphrase quality (how different are they from original?)
     original_emb = get_embedding(question)
@@ -192,7 +237,7 @@ def measure_consistency(question, num_paraphrases=3, temperature=0.3):
     if original_emb and paraphrase_embeddings:
         paraphrase_similarities = [cosine_similarity(original_emb, p_emb) for p_emb in paraphrase_embeddings]
         paraphrase_quality = 1.0 - np.mean(paraphrase_similarities)
-        print(f"  → Paraphrase quality: {paraphrase_quality:.3f} (lower similarity = better paraphrases)")
+        print(f"  -> Paraphrase quality: {paraphrase_quality:.3f} (lower similarity = better paraphrases)")
 
     print(f"  [2/3] Answering {len(paraphrases)} paraphrased questions...")
     answers = []
@@ -204,7 +249,8 @@ def measure_consistency(question, num_paraphrases=3, temperature=0.3):
             answers.append(ans)
 
     if len(answers) < 2:
-        return 0.0, paraphrases, answers, paraphrase_embeddings
+        print("  [WARN] Not enough paraphrase answers to compute consistency.")
+        return None, paraphrases, answers, paraphrase_embeddings
 
     # Get answer embeddings
     print(f"  [3/3] Computing consistency...")
@@ -215,13 +261,14 @@ def measure_consistency(question, num_paraphrases=3, temperature=0.3):
             answer_embeddings.append(emb)
 
     if len(answer_embeddings) < 2:
-        return 0.0, paraphrases, answers, paraphrase_embeddings
+        print("  [WARN] Not enough answer embeddings to compute consistency.")
+        return None, paraphrases, answers, paraphrase_embeddings
 
     # Compute consistency
     similarities = pairwise_similarities(answer_embeddings)
     consistency_score = np.mean(similarities)
 
-    print(f"  → Consistency: {consistency_score:.3f}")
+    print(f"  -> Consistency: {consistency_score:.3f}")
 
     return float(consistency_score), paraphrases, answers, paraphrase_embeddings
 
@@ -250,23 +297,23 @@ def monitor_question(question, category="unknown", samples=10, num_paraphrases=3
     start_time = time.time()
 
     # Get question embedding (for Phase 2 clustering)
-    print("\n🔍 EMBEDDING QUESTION...")
+    print("\n[1] EMBEDDING QUESTION")
     question_embedding = get_embedding(question)
 
     # Measure uncertainty
-    print("\n🔍 UNCERTAINTY ANALYSIS")
+    print("\n[2] UNCERTAINTY ANALYSIS")
     uncertainty_score, sampled_answers, answer_embeddings = measure_uncertainty(
         question, samples=samples, temperature=0.8
     )
 
     # Measure consistency
-    print("\n🔍 CONSISTENCY ANALYSIS")
+    print("\n[3] CONSISTENCY ANALYSIS")
     consistency_score, paraphrased_questions, paraphrased_answers, paraphrase_embeddings = measure_consistency(
         question, num_paraphrases=num_paraphrases, temperature=0.3
     )
 
     # Generate risk report
-    print("\n🔍 RISK ASSESSMENT")
+    print("\n[4] RISK ASSESSMENT")
     risk_report = generate_risk_report(uncertainty_score, consistency_score)
     
     total_time = time.time() - start_time
@@ -311,26 +358,28 @@ def monitor_question(question, category="unknown", samples=10, num_paraphrases=3
     log_interaction(record)
 
     # Display results
-    print_section_header("📊 MONITORING RESULTS")
-    
-    print(visualize_score(1 - uncertainty_score, "Confidence", 50))
+    print_section_header("MONITORING RESULTS")
+    confidence_score = None if uncertainty_score is None else 1 - uncertainty_score
+    safety_score = None if risk_report.get("risk_score") is None else 1 - risk_report["risk_score"]
+
+    print(visualize_score(confidence_score, "Confidence", 50))
     print(visualize_score(uncertainty_score, "Uncertainty", 50))
     print(visualize_score(consistency_score, "Consistency", 50))
-    print(visualize_score(risk_report["calibration_score"], "Calibration", 50))
-    print(visualize_score(1 - risk_report["risk_score"], "Safety", 50))
+    print(visualize_score(risk_report.get("calibration_score"), "Calibration", 50))
+    print(visualize_score(safety_score, "Safety", 50))
     
     # Risk assessment
-    print(f"\n🎯 RISK ASSESSMENT:")
+    print("\nRISK ASSESSMENT:")
     print(f"  Risk Zone: {risk_report['emoji']} {risk_report['risk_zone']}")
     print(f"  Severity Level: {risk_report['severity']}/4")
     print(f"  Description: {risk_report['description']}")
     print(f"  Recommendation: {risk_report['recommendation']}")
     
-    print(f"\n⏱️  Execution Time: {total_time:.1f}s")
+    print(f"\nExecution Time: {total_time:.1f}s")
 
     # Optional: Show sample answers
     if show_answers:
-        print_section_header("📝 SAMPLE ANSWERS")
+        print_section_header("SAMPLE ANSWERS")
         for i, ans in enumerate(sampled_answers[:3], 1):
             print(f"\n[{i}] {ans[:300]}...")
 
@@ -360,9 +409,9 @@ def monitor_questions_batch(questions_with_categories, samples=5, num_paraphrase
     print(f"{'='*70}")
     
     for i, item in enumerate(questions_with_categories, 1):
-        print(f"\n\n{'🔄'*35}")
+        print("\n" + "-" * 70)
         print(f"Question {i}/{total}")
-        print(f"{'🔄'*35}")
+        print("-" * 70)
         
         record = monitor_question(
             question=item["question"],

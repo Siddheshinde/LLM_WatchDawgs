@@ -4,15 +4,20 @@ Simple wrapper to generate dashboard from logs
 """
 
 from dashboard_generator import generate_dashboard
+import os
 import sys
 
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("  🐕 LLM WATCHDOG - Dashboard Generator")
+    print("  LLM WATCHDOG - Dashboard Generator")
     print("="*70 + "\n")
-    
-    # Check for custom log file
-    log_file = "qa_monitoring_logs.jsonl"
+
+    # Prefer pipeline reports when available (white dashboard data source)
+    log_file = (
+        "final_risk_reports.jsonl"
+        if os.path.exists("final_risk_reports.jsonl")
+        else "qa_monitoring_logs.jsonl"
+    )
     output_file = "dashboard.html"
     
     if "--log" in sys.argv:
@@ -28,6 +33,6 @@ if __name__ == "__main__":
     success = generate_dashboard(log_file, output_file)
     
     if success:
-        print(f"\n✅ Success! Open {output_file} in your browser")
+        print(f"\nSuccess! Open {output_file} in your browser")
     else:
-        print("\n❌ Failed to generate dashboard")
+        print("\nFailed to generate dashboard")

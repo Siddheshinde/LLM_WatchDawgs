@@ -1,6 +1,6 @@
 """
 main_pipeline.py
-LLM Watchdog — root-level integration pipeline
+LLM Watchdog - root-level integration pipeline
 
 Exposes run_full_pipeline(question, category, samples, paraphrases) which:
   1. Monitors the question (uncertainty + consistency + risk)
@@ -40,15 +40,15 @@ def generate_alerts(uncertainty, consistency, risk_score, risk_zone,
     Rule-based alert engine. Returns a list of fired alert dicts.
 
     Alert types:
-      HIGH_UNCERTAINTY        — uncertainty > 0.6
-      LOW_CONSISTENCY         — consistency < 0.4
-      DRIFT_ALERT             — temporal drift threshold crossed
-      CHANGE_POINT            — abrupt behavioral regime shift
-      HIGH_RISK_HALLUCINATION — risk_score > 0.7 OR zone == OVERCONFIDENT
+      HIGH_UNCERTAINTY        - uncertainty > threshold
+      LOW_CONSISTENCY         - consistency < threshold
+      DRIFT_ALERT             - temporal drift threshold crossed
+      CHANGE_POINT            - abrupt behavioral regime shift
+      HIGH_RISK_HALLUCINATION - risk_score > threshold OR zone == OVERCONFIDENT
     """
     alerts = []
 
-    if uncertainty > UNCERTAINTY_HIGH_THRESHOLD:
+    if uncertainty is not None and uncertainty > UNCERTAINTY_HIGH_THRESHOLD:
         alerts.append({
             "alert_type": "HIGH_UNCERTAINTY",
             "severity":   "WARNING",
@@ -57,7 +57,7 @@ def generate_alerts(uncertainty, consistency, risk_score, risk_zone,
             "threshold":  UNCERTAINTY_HIGH_THRESHOLD,
         })
 
-    if consistency < CONSISTENCY_LOW_THRESHOLD:
+    if consistency is not None and consistency < CONSISTENCY_LOW_THRESHOLD:
         alerts.append({
             "alert_type": "LOW_CONSISTENCY",
             "severity":   "WARNING",
@@ -84,15 +84,15 @@ def generate_alerts(uncertainty, consistency, risk_score, risk_zone,
             "threshold":  0.25,
         })
 
-    if risk_score > RISK_SCORE_HIGH_THRESHOLD or risk_zone == "OVERCONFIDENT":
+    if (risk_score is not None and risk_score > RISK_SCORE_HIGH_THRESHOLD) or risk_zone == "OVERCONFIDENT":
         alerts.append({
             "alert_type": "HIGH_RISK_HALLUCINATION",
             "severity":   "CRITICAL",
             "message": (
-                f"Hallucination risk elevated — zone={risk_zone}, "
-                f"risk_score={risk_score:.3f}"
+                f"Hallucination risk elevated - zone={risk_zone}, "
+                f"risk_score={risk_score:.3f}" if risk_score is not None else "risk_score=N/A"
             ),
-            "value":      round(risk_score, 4),
+            "value":      round(risk_score, 4) if risk_score is not None else None,
             "threshold":  RISK_SCORE_HIGH_THRESHOLD,
         })
 
@@ -164,6 +164,14 @@ def _get_latest_temporal_snapshot(log_file=LOG_FILE):
         return defaults
 
 
+def _round_metric(value, digits=4):
+    return None if value is None else round(value, digits)
+
+
+def _format_metric(value, digits=4):
+    return "N/A" if value is None else f"{value:.{digits}f}"
+
+
 # ========================
 # MAIN PIPELINE
 # ========================
@@ -174,6 +182,7 @@ def run_full_pipeline(
     samples=10,
     paraphrases=3,
     show_answers=False,
+    expected_behavior=None,
     log_file=LOG_FILE,
     reports_file=FINAL_REPORTS_FILE,
 ):
@@ -205,17 +214,18 @@ def run_full_pipeline(
     alert_count       (int),
     execution_time_seconds
     """
+    from behavior_evaluator import evaluate_answer_behavior
     from llm_monitoring import monitor_question
 
     print("\n" + "#" * 65)
-    print("  LLM WATCHDOG — FULL PIPELINE")
+    print("  LLM WATCHDOG - FULL PIPELINE")
     print("#" * 65)
     print(f"  Question : {question}")
     print(f"  Category : {category}")
     print(f"  Samples  : {samples}   Paraphrases: {paraphrases}")
     print("#" * 65)
 
-    # ── Step 1: Monitor (uncertainty + consistency + risk) ──────────────
+    # Step 1: Monitor uncertainty, consistency, and base risk.
     raw = monitor_question(
         question=question,
         category=category,
@@ -224,23 +234,38 @@ def run_full_pipeline(
         show_answers=show_answers,
     )
 
-    uncertainty   = raw.get("uncertainty_score",  0.5)
-    consistency   = raw.get("consistency_score",  0.5)
-    calibration   = raw.get("calibration_score",  0.5)
-    risk_score    = raw.get("risk_score",          0.5)
+    uncertainty   = raw.get("uncertainty_score")
+    consistency   = raw.get("consistency_score")
+    calibration   = raw.get("calibration_score")
+    risk_score    = raw.get("risk_score")
     risk_zone     = raw.get("risk_zone",           "AMBIGUOUS")
     severity      = raw.get("severity",            2)
     exec_time     = raw.get("execution_time_seconds", 0.0)
 
-    # ── Step 2: Temporal analysis ───────────────────────────────────────
+    behavior = evaluate_answer_behavior(
+        question=question,
+        answers=raw.get("sampled_answers", []),
+        category=category,
+        expected_behavior=expected_behavior,
+    )
+
+    base_risk_zone = risk_zone
+    behavior_adjusted = False
+    if not behavior["behavior_pass"]:
+        behavior_adjusted = True
+        risk_zone = "OVERCONFIDENT" if uncertainty is not None and uncertainty <= 0.12 else "UNSTABLE"
+        severity = 4 if risk_zone == "OVERCONFIDENT" else 3
+        risk_score = max(risk_score or 0.0, 0.65 if risk_zone == "OVERCONFIDENT" else 0.5)
+
+    # Step 2: Temporal analysis.
     print("\n  [Pipeline] Running temporal analysis...")
     temporal = _get_latest_temporal_snapshot(log_file)
 
-    # ── Step 3: Cluster lookup ──────────────────────────────────────────
+    # Step 3: Cluster lookup.
     print("  [Pipeline] Looking up cluster assignment...")
     cluster_id = _lookup_cluster(question)
 
-    # ── Step 4: Alert engine ────────────────────────────────────────────
+    # Step 4: Alert engine.
     alerts = generate_alerts(
         uncertainty=uncertainty,
         consistency=consistency,
@@ -250,7 +275,16 @@ def run_full_pipeline(
         change_point=temporal["change_point"],
     )
 
-    # ── Step 5: Assemble unified record ────────────────────────────────
+    if not behavior["behavior_pass"]:
+        alerts.append({
+            "alert_type": "EXPECTED_BEHAVIOR_FAILED",
+            "severity": "HIGH",
+            "message": "; ".join(behavior["behavior_flags"]),
+            "value": behavior["behavior_score"],
+            "threshold": 1.0,
+        })
+
+    # Step 5: Assemble unified record.
     record = {
         # Provenance
         "pipeline_version":    PIPELINE_VERSION,
@@ -264,12 +298,19 @@ def run_full_pipeline(
         "num_paraphrases":     paraphrases,
 
         # Core behavioral metrics
-        "uncertainty_score":   round(uncertainty,  4),
-        "consistency_score":   round(consistency,  4),
-        "calibration_score":   round(calibration,  4),
-        "risk_score":          round(risk_score,   4),
+        "uncertainty_score":   _round_metric(uncertainty),
+        "consistency_score":   _round_metric(consistency),
+        "calibration_score":   _round_metric(calibration),
+        "risk_score":          _round_metric(risk_score),
         "risk_zone":           risk_zone,
+        "base_risk_zone":      base_risk_zone,
+        "behavior_adjusted":   behavior_adjusted,
         "severity":            severity,
+        "expected_behavior":   behavior["expected_behavior"],
+        "behavior_pass":       behavior["behavior_pass"],
+        "behavior_score":      behavior["behavior_score"],
+        "behavior_flags":      behavior["behavior_flags"],
+        "behavior_signals":    behavior["behavior_signals"],
 
         # Temporal / drift
         "window_key":          temporal["window_key"],
@@ -291,11 +332,11 @@ def run_full_pipeline(
         "execution_time_seconds": round(exec_time, 2),
     }
 
-    # ── Step 6: Persist ─────────────────────────────────────────────────
+    # Step 6: Persist.
     log_interaction(record, log_file=reports_file)
-    print(f"\n  [Pipeline] Record saved → {reports_file}")
+    print(f"\n  [Pipeline] Record saved -> {reports_file}")
 
-    # ── Step 7: Print summary ───────────────────────────────────────────
+    # Step 7: Print summary.
     _print_pipeline_summary(record)
 
     return record
@@ -308,32 +349,36 @@ def run_full_pipeline(
 def _print_pipeline_summary(rec):
     """Print a clean one-screen summary of the pipeline result."""
     zone_icons = {
-        "RELIABLE":     "✅",
-        "OVERCONFIDENT":"⛔",
-        "UNSTABLE":     "⚠️ ",
-        "AMBIGUOUS":    "ℹ️ ",
+        "RELIABLE": "OK",
+        "OVERCONFIDENT": "STOP",
+        "UNSTABLE": "WARN",
+        "AMBIGUOUS": "INFO",
     }
-    sev_icons = {1: "🟢", 2: "🔵", 3: "🟡", 4: "🔴"}
+    sev_icons = {1: "LOW", 2: "MED", 3: "HIGH", 4: "CRIT"}
 
-    icon  = zone_icons.get(rec["risk_zone"], "❓")
-    s_icon = sev_icons.get(rec["severity"], "⚪")
+    icon  = zone_icons.get(rec["risk_zone"], "?")
+    s_icon = sev_icons.get(rec["severity"], "UNK")
 
     print_section_header("PIPELINE RESULT SUMMARY")
-    print(f"  {'Uncertainty':<22}: {rec['uncertainty_score']:.4f}")
-    print(f"  {'Consistency':<22}: {rec['consistency_score']:.4f}")
-    print(f"  {'Calibration':<22}: {rec['calibration_score']:.4f}")
-    print(f"  {'Risk Score':<22}: {rec['risk_score']:.4f}")
+    print(f"  {'Uncertainty':<22}: {_format_metric(rec['uncertainty_score'])}")
+    print(f"  {'Consistency':<22}: {_format_metric(rec['consistency_score'])}")
+    print(f"  {'Calibration':<22}: {_format_metric(rec['calibration_score'])}")
+    print(f"  {'Risk Score':<22}: {_format_metric(rec['risk_score'])}")
     print(f"  {'Risk Zone':<22}: {icon} {rec['risk_zone']}")
+    if rec.get("behavior_adjusted"):
+        print(f"  {'Base Risk Zone':<22}: {rec.get('base_risk_zone', 'n/a')}")
+    print(f"  {'Expected Behavior':<22}: {rec.get('expected_behavior', 'n/a')}")
+    print(f"  {'Behavior Check':<22}: {'pass' if rec.get('behavior_pass') else 'fail'}")
     print(f"  {'Severity':<22}: {s_icon} {rec['severity']}/4")
     print(f"  {'Drift Score':<22}: {rec['drift_score']:.4f}  "
           f"({'ALERT' if rec['drift_alert'] else 'ok'})")
-    print(f"  {'Change Point':<22}: {'YES ⚡' if rec['change_point'] else 'no'}")
+    print(f"  {'Change Point':<22}: {'YES' if rec['change_point'] else 'no'}")
     print(f"  {'Cluster':<22}: {rec['cluster_id'] if rec['cluster_id'] >= 0 else 'n/a'}")
 
     if rec["alerts"]:
         print(f"\n  ALERTS FIRED ({rec['alert_count']}):")
         for a in rec["alerts"]:
-            print(f"    [{a['severity']}] {a['alert_type']} — {a['message']}")
+            print(f"    [{a['severity']}] {a['alert_type']} - {a['message']}")
     else:
         print("\n  No alerts fired.")
 
@@ -348,11 +393,12 @@ def _print_pipeline_summary(rec):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="LLM Watchdog — full pipeline")
+    parser = argparse.ArgumentParser(description="LLM Watchdog - full pipeline")
     parser.add_argument("--question",   required=True,  help="Question to evaluate")
     parser.add_argument("--category",   default="unknown")
     parser.add_argument("--samples",    type=int, default=10)
     parser.add_argument("--paraphrases",type=int, default=3)
+    parser.add_argument("--expected-behavior", default=None)
     parser.add_argument("--show-answers", action="store_true")
     args = parser.parse_args()
 
@@ -361,5 +407,6 @@ if __name__ == "__main__":
         category=args.category,
         samples=args.samples,
         paraphrases=args.paraphrases,
+        expected_behavior=args.expected_behavior,
         show_answers=args.show_answers,
     )
